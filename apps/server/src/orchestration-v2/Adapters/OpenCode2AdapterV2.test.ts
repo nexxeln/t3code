@@ -427,6 +427,55 @@ describe("OpenCode2 adapter", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("runs a model at its default in place of a variant it does not list", () =>
+    Effect.gen(function* () {
+      const deepseek = { providerID: "opencode-go", id: "deepseek-v4.1-flash" };
+      const runtime = yield* openCode2ReplayRuntimeWithInstructions([
+        out("event.subscribe"),
+        out("model.list", "<any>"),
+        reply("model.list", {
+          location: { directory: WORK },
+          data: [
+            {
+              ...modelCatalog.data[0]!,
+              ...deepseek,
+              modelID: deepseek.id,
+              name: "DeepSeek V4.1 Flash",
+              variants: ["low", "high", "max"].map((id) => ({
+                id,
+                settings: { reasoningEffort: id },
+              })),
+            },
+          ],
+        }),
+        out("session.create", {
+          location: { directory: WORK },
+          model: { ...deepseek, variant: "high" },
+          permissions: t3Rules,
+        }),
+        replyData("session.create", sessionInfo({ model: { ...deepseek, variant: "high" } })),
+        out("session.switchModel", { sessionID: SESSION, model: { ...deepseek, variant: "max" } }),
+        reply("session.switchModel", null),
+        out("session.prompt", { sessionID: SESSION, text: "<any>" }),
+        promptAccepted,
+        event("session.execution.succeeded", { sessionID: SESSION }),
+      ]);
+      const selection = (variant: string): ModelSelection => ({
+        instanceId,
+        model: "opencode-go/deepseek-v4.1-flash",
+        options: [{ id: "variant", value: variant }],
+      });
+      const thread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection: selection("medium"),
+        runtimePolicy: policy(),
+      });
+      const terminal = yield* terminalOf(runtime).pipe(Effect.forkScoped);
+      yield* runtime.startTurn(turnInput(thread, selection("max")));
+      assert.equal((yield* Fiber.join(terminal))?.status, "completed");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("ends the turn when its terminal event is one this build cannot decode", () =>
     Effect.gen(function* () {
       const { runtime, thread } = yield* resumed([

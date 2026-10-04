@@ -587,6 +587,49 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
+  it.effect("defaults each OpenCode Go model to a reasoning level it lists", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode v2.0.18\n";
+      const snapshot = yield* checkProvider(
+        makeOpenCodeSettings(),
+        process.cwd(),
+        undefined,
+        undefined,
+        Effect.succeed([
+          {
+            providerID: "opencode-go",
+            id: "deepseek-v4.1-flash",
+            name: "DeepSeek V4.1 Flash",
+            variants: [{ id: "low" }, { id: "high" }, { id: "max" }],
+          },
+          {
+            providerID: "opencode-go",
+            id: "muse-spark-1.3-contributor",
+            name: "Muse Spark 1.3 Contributor",
+            variants: [
+              { id: "minimal" },
+              { id: "low" },
+              { id: "medium" },
+              { id: "high" },
+              { id: "xhigh" },
+            ],
+          },
+        ]),
+      );
+
+      NodeAssert.deepEqual(
+        snapshot.models.map((model) => {
+          const variant = model.capabilities?.optionDescriptors?.[0];
+          return [model.slug, variant?.type === "select" ? variant.currentValue : undefined];
+        }),
+        [
+          ["opencode-go/deepseek-v4.1-flash", "high"],
+          ["opencode-go/muse-spark-1.3-contributor", "medium"],
+        ],
+      );
+    }),
+  );
+
   it.effect("reports a failed OpenCode 2 model list without the server's response", () =>
     Effect.gen(function* () {
       runtimeMock.state.versionStdout = "opencode v2.0.18\n";

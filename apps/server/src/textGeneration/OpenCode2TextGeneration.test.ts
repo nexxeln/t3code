@@ -39,6 +39,82 @@ it.layer(layer)("OpenCode2TextGeneration", (it) => {
     }).pipe(Effect.scoped),
   );
 
+  it.effect("generates at the model's default in place of a variant it does not list", () =>
+    Effect.gen(function* () {
+      const [subscribe, connected, , ...rest] = OPENCODE2_TITLE_GENERATION;
+      const server = yield* OpenCode2AdapterV2Testkit.replayServer({
+        provider: "opencode",
+        protocol: OpenCode2AdapterV2Testkit.OPENCODE2_HTTP_PROTOCOL,
+        version: "2.0.18",
+        scenario: "opencode2_title_generation_unlisted_variant",
+        entries: [
+          {
+            type: "expect_outbound",
+            frame: { type: "model.list", input: { "location[directory]": process.cwd() } },
+          },
+          {
+            type: "emit_inbound",
+            frame: {
+              type: "sdk.response",
+              operation: "model.list",
+              data: {
+                location: { directory: process.cwd() },
+                data: [
+                  {
+                    id: "deepseek-v4.1-flash",
+                    modelID: "deepseek-v4.1-flash",
+                    providerID: "opencode-go",
+                    name: "DeepSeek V4.1 Flash",
+                    package: "@opencode/ai/providers/openai-compatible",
+                    capabilities: { tools: true, input: ["text"], output: ["text"] },
+                    variants: ["low", "high", "max"].map((id) => ({
+                      id,
+                      settings: { reasoningEffort: id },
+                    })),
+                    time: { released: 1790812800000 },
+                    cost: [{ input: 0, output: 0, cache: { read: 0, write: 0 } }],
+                    status: "active",
+                    enabled: true,
+                    limit: { context: 1048576, output: 131072 },
+                  },
+                ],
+              },
+            },
+          },
+          subscribe!,
+          connected!,
+          {
+            type: "expect_outbound",
+            frame: {
+              type: "session.create",
+              input: {
+                title: "T3 Code generateThreadTitle",
+                location: { directory: "<any>" },
+                model: { providerID: "opencode-go", id: "deepseek-v4.1-flash", variant: "high" },
+                permissions: [{ action: "*", resource: "*", effect: "ask" }],
+              },
+            },
+          },
+          ...rest,
+          { type: "runtime_exit", status: "success" },
+        ],
+      });
+      const textGeneration = yield* OpenCode2TextGeneration.make().pipe(
+        Effect.provideService(OpenCode2Server.OpenCode2Server, server),
+      );
+      const title = yield* textGeneration.generateThreadTitle({
+        cwd: process.cwd(),
+        message: "fix the login redirect loop after oauth",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("opencode"),
+          model: "opencode-go/deepseek-v4.1-flash",
+          options: [{ id: "variant", value: "medium" }],
+        },
+      });
+      assert.equal(title.title, "Fix OAuth Login Redirect Loop");
+    }).pipe(Effect.scoped),
+  );
+
   it.effect("fails at once when the event stream drops before the reply", () =>
     Effect.gen(function* () {
       const [subscribe, connected, create, created] = OPENCODE2_TITLE_GENERATION;
