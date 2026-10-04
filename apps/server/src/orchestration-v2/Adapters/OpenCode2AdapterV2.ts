@@ -68,6 +68,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../../config.ts";
+import { resolveOpenCodeVariant } from "../../provider/Layers/OpenCodeProvider.ts";
 import { paginate, type OpenCode2StreamEvent } from "../../provider/opencode2/OpenCode2Client.ts";
 import * as OpenCode2Server from "../../provider/opencode2/OpenCode2Server.ts";
 import {
@@ -677,6 +678,7 @@ const deliver = <E>(answer: Effect.Effect<void, E>) =>
   );
 
 type ModelRef = ReturnType<typeof Model.Ref.make>;
+type ListedModel = { readonly window: number; readonly variants: ReadonlyArray<string> };
 
 /**
  * The user message ids T3 prompts under. OpenCode takes a client id (it must
@@ -746,12 +748,20 @@ const isProviderAdapterError = Schema.is(ProviderAdapter.ProviderAdapterV2Error)
 /**
  * The model OpenCode should run for a `provider/model` slug and its reasoning
  * variant, or undefined for any other slug: sending none would run OpenCode's
- * default while T3 records the requested model.
+ * default while T3 records the requested model. `variants` are the ones the
+ * server lists for the model, undefined when it does not list the model.
  */
-const modelRef = (selection: ProviderAdapter.ProviderAdapterV2TurnInput["modelSelection"]) => {
+const modelRef = (
+  selection: ProviderAdapter.ProviderAdapterV2TurnInput["modelSelection"],
+  variants: ReadonlyArray<string> | undefined,
+) => {
   const parsed = parseOpenCodeModelSlug(selection.model);
   if (parsed === null) return undefined;
-  const variant = getModelSelectionStringOptionValue(selection, "variant");
+  const variant = resolveOpenCodeVariant(
+    parsed.providerID,
+    variants,
+    getModelSelectionStringOptionValue(selection, "variant"),
+  );
   return Model.Ref.make({
     providerID: Provider.ID.make(parsed.providerID),
     id: Model.ID.make(parsed.modelID),
@@ -848,14 +858,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
     // Replaced when the session reconnects to a restarted server.
     let client = connection.client;
     const sessionScope = yield* Effect.scope;
-    // Context windows by directory, then `provider/model`: a project's own
-    // OpenCode config can change a model's limits, and this one runtime serves
-    // the instance's threads in every directory.
-    const contextWindows = new Map<string, Map<string, number>>();
+    // Listed models by directory, then `provider/model`: a project's own
+    // OpenCode config can change a model's limits and variants, and this one
+    // runtime serves the instance's threads in every directory.
+    const listedModels = new Map<string, Map<string, ListedModel>>();
     /** A thread without a worktree runs where T3 does, as its session is created. */
     const directoryOf = (cwd: string | null | undefined) => cwd ?? serverConfig.cwd;
+    const listedModel = (cwd: string | null | undefined, model: string) =>
+      listedModels.get(directoryOf(cwd))?.get(model);
     const windowOf = (cwd: string | null | undefined, model: string) =>
-      contextWindows.get(directoryOf(cwd))?.get(model);
+      listedModel(cwd, model)?.window;
     const now = yield* DateTime.now;
     let session: OrchestrationV2ProviderSession = {
       id: input.providerSessionId,
@@ -2885,24 +2897,24 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
       );
     }
 
-    // Context windows come from the server's model list for a directory, read
-    // when the session opens, before a thread first runs in another directory,
-    // and again after a turn whose model had none yet. A directory counts as
-    // known once its read starts, so a failed read is retried only after a turn.
+    // A directory's models are read when the session opens, before a thread
+    // first runs in another directory, and again after a turn whose model had
+    // no window yet. A directory counts as known once its read starts, so a
+    // failed read is retried only after a turn.
     const readModels = (directory: string) =>
       Effect.suspend(() => {
-        const windows = contextWindows.get(directory) ?? new Map<string, number>();
-        contextWindows.set(directory, windows);
+        const listed = listedModels.get(directory) ?? new Map<string, ListedModel>();
+        listedModels.set(directory, listed);
         return client.model.list({ location: { directory } }).pipe(
           Effect.timeout("5 seconds"),
           Effect.tap((models) =>
             Effect.sync(() => {
               for (const model of models.data) {
-                // A model's input limit, when it has one, is its real headroom.
-                windows.set(
-                  `${model.providerID}/${model.id}`,
-                  model.limit.input ?? model.limit.context,
-                );
+                listed.set(`${model.providerID}/${model.id}`, {
+                  // A model's input limit, when it has one, is its real headroom.
+                  window: model.limit.input ?? model.limit.context,
+                  variants: model.variants.map((variant) => variant.id),
+                });
               }
             }),
           ),
@@ -2910,7 +2922,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
         );
       });
     const readModelsOnce = (cwd: string | null | undefined) =>
-      contextWindows.has(directoryOf(cwd)) ? Effect.void : readModels(directoryOf(cwd));
+      listedModels.has(directoryOf(cwd)) ? Effect.void : readModels(directoryOf(cwd));
     yield* readModels(session.cwd);
 
     // Each agent's own path allows, by the directory they were listed for.
@@ -3575,7 +3587,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
             });
           }
           yield* readModelsOnce(threadInput.runtimePolicy.cwd);
-          const model = modelRef(threadInput.modelSelection);
+          const model = modelRef(
+            threadInput.modelSelection,
+            listedModel(threadInput.runtimePolicy.cwd, threadInput.modelSelection.model)?.variants,
+          );
           if (model === undefined) {
             return yield* new ProviderAdapter.ProviderAdapterProtocolError({
               driver: OPENCODE_PROVIDER,
@@ -3750,7 +3765,10 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
               }
               // A turn T3 will not run still starts and fails, so the refusal is what
               // the user reads.
-              const model = modelRef(turnInput.modelSelection);
+              const model = modelRef(
+                turnInput.modelSelection,
+                listedModel(turnInput.runtimePolicy.cwd, turnInput.modelSelection.model)?.variants,
+              );
               if (model === undefined) {
                 yield* begin;
                 return yield* finishTurn(state, {

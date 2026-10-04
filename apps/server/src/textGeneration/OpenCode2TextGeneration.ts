@@ -17,6 +17,7 @@ import * as Stream from "effect/Stream";
 
 import * as ServerConfig from "../config.ts";
 import { resolveAttachmentPath } from "../attachmentStore.ts";
+import { resolveOpenCodeVariant } from "../provider/Layers/OpenCodeProvider.ts";
 import type { OpenCode2Connection } from "../provider/opencode2/OpenCode2Server.ts";
 import * as OpenCode2Server from "../provider/opencode2/OpenCode2Server.ts";
 import { parseOpenCodeModelSlug } from "../provider/opencodeRuntime.ts";
@@ -54,7 +55,24 @@ const runOnServer = (
         detail: "OpenCode model selection must use the 'provider/model' format.",
       });
     }
-    const variant = getModelSelectionStringOptionValue(input.modelSelection, "variant");
+    const requested = getModelSelectionStringOptionValue(input.modelSelection, "variant");
+    const listed =
+      requested === undefined
+        ? undefined
+        : yield* client.model.list({ location: { directory: input.cwd } }).pipe(
+            Effect.timeout("5 seconds"),
+            Effect.map((models) =>
+              models.data.find(
+                (model) => model.providerID === parsed.providerID && model.id === parsed.modelID,
+              ),
+            ),
+            Effect.orElseSucceed(() => undefined),
+          );
+    const variant = resolveOpenCodeVariant(
+      parsed.providerID,
+      listed?.variants.map(({ id }) => id),
+      requested,
+    );
     const outcome = yield* Deferred.make<Outcome>();
     let sessionId: string | undefined;
     const texts = new Map<string, string>();

@@ -157,10 +157,28 @@ function inferDefaultVariant(
   if (providerID === "anthropic" || providerID.startsWith("google")) {
     return variants.includes("high") ? "high" : undefined;
   }
-  if (providerID === "openai" || providerID === "opencode") {
+  if (providerID === "openai" || providerID === "opencode" || providerID === "opencode-go") {
     return variants.includes("medium") ? "medium" : variants.includes("high") ? "high" : undefined;
   }
   return undefined;
+}
+
+/**
+ * The variant to send OpenCode for `requested`, given the variants the server
+ * lists for the model (undefined when it does not list the model). OpenCode 2
+ * refuses a variant the model does not list, which a selection saved on another
+ * model or inherited by a worker can carry; the model's default runs instead,
+ * as the composer shows it.
+ */
+export function resolveOpenCodeVariant(
+  providerID: string,
+  listed: ReadonlyArray<string> | undefined,
+  requested: string | undefined,
+): string | undefined {
+  if (requested === undefined || listed === undefined || listed.includes(requested)) {
+    return requested;
+  }
+  return inferDefaultVariant(providerID, listed);
 }
 
 function inferDefaultAgent(agents: ReadonlyArray<Agent>): string | undefined {
